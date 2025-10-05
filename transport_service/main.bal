@@ -1,24 +1,48 @@
 import ballerina/http;
-import ballerina/log;
+import ballerinax/mongodb;
+import ballerina/kafka;
 
-// Simple HTTP service skeleton for <SERVICE_NAME>
-// Replace with your real code (Kafka, DB clients, endpoints...).
+type Route record {
+    string _id;
+    string name;
+    json schedule;
+};
 
-listener http:Listener backendEP = new(9090);
+mongodb:Client mongoClient = check new({
+    connection: "mongodb://mongo:27017",
+    database: "smart_ticketing"
+});
 
-service / on backendEP {
+listener http:Listener transportListener = new (8082);
 
-    // GET /health
-    resource function get health(http:Caller caller, http:Request req) returns error? {
-        json resp = { status: "ok", service: "<SERVICE_NAME>" };
-        check caller->respond(resp);
+// Kafka producer to publish schedule updates
+kafka:Producer scheduleProducer = check new({
+    bootstrapServers: "kafka:9092"
+});
+
+service /transport on transportListener {
+
+    resource function post route(http:Request req) returns http:Response|error {
+        Route r = check req.getJsonPayload();
+        r._id = "route-" + r.name.replaceAll("\\s+", "-");
+        mongodb:Database db = check mongoClient->getDatabase("smart_ticketing");
+        mongodb:Collection col = check db->getCollection("routes");
+        check col->insert(r);
+        return new http:Response("route created");
     }
 
-    // Example endpoint, replace with your actual handlers
-    resource function post action(http:Caller caller, http:Request req) returns error? {
-        json payload = check req.getJsonPayload();
-        log:printInfo("<<SERVICE>> Received: " + payload.toString());
-        json resp = { result: "accepted", service: "<SERVICE_NAME>" };
-        check caller->respond(resp);
+    resource function post publishSchedule(http:Request req) returns http:Response|error {
+        map<any> body = check req.getJsonPayload();
+        string routeId = body["routeId"].toString();
+        json update = body["update"];
+        // publish to Kafka topic schedule.updates
+        var sendRes = scheduleProducer->send({
+            topic: "schedule.updates",
+            value: update.toJsonString()
+        });
+        if sendRes is error {
+            return new http:Response("failed", 500);
+        }
+        return new http:Response("published");
     }
 }
