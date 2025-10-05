@@ -1,24 +1,53 @@
 import ballerina/http;
+import ballerinax/mongodb;
+import ballerina/kafka;
 import ballerina/log;
 
-// Simple HTTP service skeleton for <SERVICE_NAME>
-// Replace with your real code (Kafka, DB clients, endpoints...).
+type Ticket record {
+    string _id;
+    string passengerId;
+    string routeId;
+    string status; // CREATED, PAID, VALIDATED, EXPIRED
+    int createdAt;
+};
 
-listener http:Listener backendEP = new(9090);
+mongodb:Client mongoClient = check new({
+    connection: "mongodb://mongo:27017",
+    database: "smart_ticketing"
+});
 
-service / on backendEP {
+listener http:Listener ticketListener = new (8083);
 
-    // GET /health
-    resource function get health(http:Caller caller, http:Request req) returns error? {
-        json resp = { status: "ok", service: "<SERVICE_NAME>" };
-        check caller->respond(resp);
-    }
+// Kafka producer to request payments
+kafka:Producer paymentProducer = check new({
+    bootstrapServers: "kafka:9092"
+});
 
-    // Example endpoint, replace with your actual handlers
-    resource function post action(http:Caller caller, http:Request req) returns error? {
-        json payload = check req.getJsonPayload();
-        log:printInfo("<<SERVICE>> Received: " + payload.toString());
-        json resp = { result: "accepted", service: "<SERVICE_NAME>" };
-        check caller->respond(resp);
+// Kafka consumer to receive payment confirmations
+listener kafka:Listener paymentsConsumer = new (kafka:DEFAULT_URL, {
+    groupId: "payment-confirm-group"
+});
+
+service /ticket on ticketListener {
+
+    resource function post create(http:Request req) returns http:Response|error {
+        Ticket t = check req.getJsonPayload();
+        t._id = "t-" + t.passengerId + "-" + (time:currentTime().unixTimestamp()).toString();
+        t.status = "CREATED";
+        t.createdAt = time:currentTime().unixTimestamp();
+        mongodb:Database db = check mongoClient->getDatabase("smart_ticketing");
+        mongodb:Collection col = check db->getCollection("tickets");
+        check col->insert(t);
+
+        // publish payment request
+        var sendRes = paymentProducer->send({
+            topic: "ticket.requests",
+            key: t._id,
+            value: t.toJsonString()
+        });
+        if sendRes is error {
+            return new http:Response("failed to request payment", 500);
+        }
+        return new http:Response("ticket created: " + t._id);
     }
 }
